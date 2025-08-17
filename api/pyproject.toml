@@ -1,0 +1,20 @@
+[project]
+name = "assistente-tintas-api"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]",
+  "pydantic>=2.8",
+  "sqlalchemy>=2.0",
+  "psycopg[binary]>=3.2",
+  "python-dotenv",
+  "passlib[bcrypt]",
+  "pyjwt",
+  "httpx",
+  "openai>=1.40.0",
+  "langchain>=0.2.10",
+]
+
+[tool.uvicorn]
+reload = true
