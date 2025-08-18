@@ -220,52 +220,53 @@ def indexar_csv_tintas(caminho_csv: str) -> dict:
         db.close()
 
 # ==========================================
-# 🤖 FUNÇÕES DE RECOMENDAÇÃO COM IA
+# 🤖 NOVAS FUNÇÕES DE RECOMENDAÇÃO COM IA
 # ==========================================
 
 def buscar_produtos_similares(db: Session, consulta: str, limite: int = 3) -> List[Dict]:
-    """
-    Busca produtos similares usando embeddings + pgvector
-    """
+    """Busca produtos similares usando embeddings + pgvector - VERSÃO CORRIGIDA"""
     if not _client:
         raise RuntimeError("OPENAI_API_KEY não configurada")
     
-    # Gera embedding da consulta
     embedding_consulta = embed_texto(consulta)
     
-    # Busca por similaridade usando pgvector
+    # VERSÃO CORRIGIDA - usando o formato correto para pgvector
     sql = text("""
         SELECT 
-            t.id, t.nome, t.cor, t.ambiente, t.acabamento, 
+            t.id::text as id, t.nome, t.cor, t.ambiente, t.acabamento, 
             t.features, t.linha, t.descricao, t.superficie_indicada,
             te.conteudo,
-            (1 - (te.embedding <=> :embedding::vector)) as score
+            (1 - (te.embedding <=> :embedding_vec)) as score
         FROM tintas t 
         JOIN embeddings_tintas te ON t.id = te.tinta_id
-        ORDER BY te.embedding <=> :embedding::vector
+        ORDER BY te.embedding <=> :embedding_vec
         LIMIT :limite
     """)
     
-    # Formato correto para pgvector
+    # Formato correto: string com vetor literal
     embedding_str = _to_vec_literal(embedding_consulta)
     
-    resultados = db.execute(sql, {
-        "embedding": embedding_str,
-        "limite": limite
-    }).mappings().all()
-    
-    return [dict(item) for item in resultados]
+    try:
+        resultados = db.execute(sql, {
+            "embedding_vec": embedding_str,
+            "limite": limite
+        }).mappings().all()
+        
+        return [dict(item) for item in resultados]
+        
+    except Exception as e:
+        # Se der erro na busca por embeddings, usa fallback
+        print(f"⚠️ Erro na busca por embeddings: {str(e)}")
+        db.rollback()  # Importante: rollback da transação
+        raise Exception(f"Erro embeddings: {str(e)}")
 
 def montar_contexto_produtos(produtos: List[Dict]) -> str:
-    """
-    Formata produtos encontrados para o LLM
-    """
+    """Formata produtos para o LLM"""
     if not produtos:
-        return "Nenhum produto encontrado na base de dados."
+        return "Nenhum produto encontrado."
     
     contexto_produtos = []
     for i, produto in enumerate(produtos, 1):
-        # Processa features JSON
         features_str = ""
         if produto.get('features'):
             try:
@@ -279,9 +280,7 @@ def montar_contexto_produtos(produtos: List[Dict]) -> str:
                 features_str = str(produto.get('features', 'N/A'))
         
         score = produto.get('score', 0)
-        
-        produto_info = f"""
-PRODUTO {i}: {produto['nome']}
+        produto_info = f"""PRODUTO {i}: {produto['nome']}
 - Cor: {produto['cor']}
 - Linha: {produto.get('linha', 'N/A')}
 - Superfície: {produto.get('superficie_indicada', 'N/A')}
@@ -289,19 +288,14 @@ PRODUTO {i}: {produto['nome']}
 - Acabamento: {produto['acabamento']}
 - Features: {features_str}
 - Descrição: {produto.get('descricao', 'N/A')}
-- Score: {score:.3f}
-        """.strip()
-        
+- Score: {score:.3f}"""
         contexto_produtos.append(produto_info)
     
     return "\n\n".join(contexto_produtos)
 
 def criar_prompt_suvinil() -> str:
-    """
-    Cria o prompt baseado no prompt.txt do projeto
-    """
-    return """
-Você é o Conselheiro Suvinil, especialista em tintas que ajuda clientes via chat com respostas DIRETAS e ÚTEIS.
+    """Prompt do Conselheiro Suvinil"""
+    return """Você é o Conselheiro Suvinil, especialista em tintas que ajuda clientes via chat com respostas DIRETAS e ÚTEIS.
 
 REGRAS:
 ✅ Responda em até 6 linhas + bullets (máximo)
@@ -328,27 +322,20 @@ Tem tecnologia sem odor e é perfeita para ambientes internos.
 • Lavável e fácil de limpar
 • Acabamento acetinado suave
 
-💡 Já escolheu a cor ou quer sugestões?"
-    """.strip()
+💡 Já escolheu a cor ou quer sugestões?\""""
 
 def chamar_llm_para_recomendacao(consulta_usuario: str, contexto_produtos: str) -> str:
-    """
-    Chama OpenAI para gerar resposta natural do Conselheiro Suvinil
-    """
+    """Chama OpenAI para gerar resposta"""
     if not _client:
         return "Erro: OpenAI não configurado. Configure OPENAI_API_KEY no .env"
     
     prompt_sistema = criar_prompt_suvinil()
-    
-    prompt_usuario = f"""
-CONSULTA DO CLIENTE: "{consulta_usuario}"
+    prompt_usuario = f"""CONSULTA DO CLIENTE: "{consulta_usuario}"
 
 PRODUTOS ENCONTRADOS NA BASE SUVINIL:
 {contexto_produtos}
 
-Como Conselheiro Suvinil, recomende o melhor produto seguindo EXATAMENTE o formato especificado.
-Seja direto, útil e conversacional.
-    """.strip()
+Como Conselheiro Suvinil, recomende o melhor produto seguindo EXATAMENTE o formato especificado."""
     
     try:
         response = _client.chat.completions.create(
@@ -360,45 +347,55 @@ Seja direto, útil e conversacional.
             max_tokens=400,
             temperature=0.7
         )
-        
         return response.choices[0].message.content.strip()
-    
     except Exception as e:
         return f"Erro ao gerar recomendação: {str(e)}"
 
 def recomendar_com_explicacao(db: Session, consulta: str, limite: int = 3) -> Dict[str, Any]:
-    """
-    FUNÇÃO PRINCIPAL: Orquestra todo o processo de recomendação
-    """
+    """FUNÇÃO PRINCIPAL de recomendação - VERSÃO SEGURA"""
+    
+    # PRIMEIRO: Verificar se existem embeddings
     try:
-        # Passo 1: Buscar produtos similares usando embeddings
+        count_embeddings = db.execute(text("SELECT COUNT(*) FROM embeddings_tintas")).scalar()
+        if count_embeddings == 0:
+            print("⚠️ Nenhum embedding encontrado, usando busca simples")
+            return busca_simples_fallback(db, consulta, limite)
+    except Exception as e:
+        print(f"⚠️ Tabela embeddings_tintas não existe: {str(e)}")
+        return busca_simples_fallback(db, consulta, limite)
+    
+    # SEGUNDO: Tentar busca por embeddings
+    try:
         produtos = buscar_produtos_similares(db, consulta, limite)
         
-        # Passo 2: Montar contexto formatado
-        contexto = montar_contexto_produtos(produtos)
+        if not produtos:
+            print("⚠️ Busca por embeddings não retornou resultados, usando fallback")
+            return busca_simples_fallback(db, consulta, limite)
         
-        # Passo 3: Gerar resposta com LLM usando prompt Suvinil
+        contexto = montar_contexto_produtos(produtos)
         resposta_llm = chamar_llm_para_recomendacao(consulta, contexto)
         
-        # Passo 4: Retorna resultado estruturado
         return {
             "resposta": resposta_llm,
             "produtos_encontrados": produtos,
             "contexto_usado": contexto,
             "consulta_original": consulta,
             "modelo_embedding": MODEL,
-            "modelo_llm": "gpt-4o-mini"
+            "modelo_llm": "gpt-4o-mini",
+            "metodo": "embeddings"
         }
         
     except Exception as e:
-        print(f"⚠️  Erro em embeddings: {str(e)}")
-        # Fallback para busca simples
+        print(f"⚠️ Erro em embeddings, usando fallback: {str(e)}")
+        # Rollback para limpar transação com erro
+        try:
+            db.rollback()
+        except:
+            pass
         return busca_simples_fallback(db, consulta, limite)
 
 def busca_simples_fallback(db: Session, consulta: str, limite: int) -> Dict[str, Any]:
-    """
-    FALLBACK: Busca simples caso embeddings falhem
-    """
+    """Fallback caso embeddings falhem"""
     try:
         sql = text("""
             SELECT id, nome, cor, ambiente, acabamento, linha, descricao
@@ -410,11 +407,7 @@ def busca_simples_fallback(db: Session, consulta: str, limite: int) -> Dict[str,
         """)
         
         busca_termo = f"%{consulta.lower()}%"
-        resultados = db.execute(sql, {
-            "busca": busca_termo,
-            "limite": limite
-        }).mappings().all()
-        
+        resultados = db.execute(sql, {"busca": busca_termo, "limite": limite}).mappings().all()
         produtos = [dict(item) for item in resultados]
         
         if produtos:
@@ -433,7 +426,6 @@ def busca_simples_fallback(db: Session, consulta: str, limite: int) -> Dict[str,
             "consulta_original": consulta,
             "status": "fallback_busca_simples"
         }
-        
     except Exception as e:
         return {
             "resposta": f"Erro no sistema: {str(e)}",

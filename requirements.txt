@@ -8,6 +8,7 @@ passlib[bcrypt]
 bcrypt==4.0.1
 pyjwt
 httpx
-openai>=1.40.0
-langchain>=0.2.10
+openai>=1.55.3
+langchain==0.3.13
+langchain-openai==0.2.13
 email-validator
